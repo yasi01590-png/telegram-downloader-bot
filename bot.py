@@ -1,12 +1,34 @@
 import os
 import asyncio
 import time
+from threading import Thread
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
+from pyrogram.types import Message
 from config import Config
 from downloader import Downloader
 
+# --- Web Server for Health Check ---
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
+    
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    port = int(os.environ.get('PORT', 8000))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    server.serve_forever()
+
+# Start health server
+Thread(target=run_health_server, daemon=True).start()
+
+# --- Telegram Bot ---
 app = Client(
     "downloader_bot",
     api_id=Config.API_ID,
@@ -39,55 +61,39 @@ def create_progress_bar(progress, length=20):
 
 @app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
-    welcome_text = """
-🎉 **به ربات دانلودر خوش آمدید!**
-
-📥 این ربات می‌تواند:
-• لینک‌های مستقیم را دانلود کند
-• فایل‌های m3u8 را به mp4 تبدیل کند
-• ویدیوها را از سایت‌های مختلف دانلود کند
-
-📌 **نحوه استفاده:**
-فقط لینک را برای من بفرستید!
-
-🔧 **دستورات:**
-/start - شروع
-/help - راهنما
-"""
-    await message.reply_text(welcome_text)
+    await message.reply_text(
+        "🎉 **به ربات دانلودر خوش آمدید!**\n\n"
+        "📥 این ربات می‌تواند:\n"
+        "• لینک‌های مستقیم را دانلود کند\n"
+        "• فایل‌های m3u8 را به mp4 تبدیل کند\n\n"
+        "📌 **لینک خود را بفرستید!**\n\n"
+        "⚠️ حداکثر حجم: 2GB"
+    )
 
 @app.on_message(filters.command("help"))
 async def help_command(client: Client, message: Message):
-    help_text = """
-📚 **راهنمای استفاده**
-
-1️⃣ **دانلود فایل مستقیم:**
-   لینک مستقیم فایل را بفرستید
-
-2️⃣ **دانلود m3u8:**
-   لینک m3u8 را بفرستید، ربات آن را به mp4 تبدیل می‌کند
-
-⚠️ **نکات:**
-• صبور باشید
-• حداکثر حجم: 2 گیگابایت
-"""
-    await message.reply_text(help_text)
+    await message.reply_text(
+        "📚 **راهنما**\n\n"
+        "1️⃣ لینک مستقیم بفرستید\n"
+        "2️⃣ لینک m3u8 بفرستید\n\n"
+        "ربات فایل را دانلود و ارسال می‌کند ✅"
+    )
 
 @app.on_message(filters.text & filters.private & ~filters.command(["start", "help"]))
 async def handle_url(client: Client, message: Message):
     url = message.text.strip()
     
     if not url.startswith(('http://', 'https://')):
-        await message.reply_text("❌ لطفاً یک لینک معتبر ارسال کنید!")
+        await message.reply_text("❌ لینک معتبر نیست!")
         return
     
     user_id = message.from_user.id
     if user_id in active_downloads:
-        await message.reply_text("⏳ شما یک دانلود فعال دارید. لطفاً صبر کنید...")
+        await message.reply_text("⏳ صبر کنید...")
         return
     
     active_downloads[user_id] = True
-    status_msg = await message.reply_text("🔍 در حال بررسی لینک...")
+    status_msg = await message.reply_text("🔍 در حال بررسی...")
     
     start_time = time.time()
     last_update = 0
@@ -103,21 +109,16 @@ async def handle_url(client: Client, message: Message):
         
         elapsed = current_time - start_time
         speed = downloaded / elapsed if elapsed > 0 else 0
-        eta = (total - downloaded) / speed if speed > 0 else 0
         
         progress_bar = create_progress_bar(progress)
         
-        progress_text = f"""
-📥 **در حال دانلود...**
-
-{progress_bar} {progress:.1f}%
-
-📦 حجم: {format_size(downloaded)} / {format_size(total)}
-⚡ سرعت: {format_size(speed)}/s
-⏱ باقی‌مانده: {format_time(eta)}
-"""
         try:
-            await status_msg.edit_text(progress_text)
+            await status_msg.edit_text(
+                f"📥 **دانلود...**\n\n"
+                f"{progress_bar} {progress:.1f}%\n\n"
+                f"📦 {format_size(downloaded)} / {format_size(total)}\n"
+                f"⚡ {format_size(speed)}/s"
+            )
         except:
             pass
     
@@ -128,12 +129,12 @@ async def handle_url(client: Client, message: Message):
         file_size = os.path.getsize(filepath)
         
         if file_size > Config.MAX_FILE_SIZE:
-            await status_msg.edit_text(f"❌ حجم فایل ({format_size(file_size)}) بیشتر از 2GB است!")
+            await status_msg.edit_text(f"❌ حجم بیشتر از 2GB است!")
             downloader.cleanup(filepath)
             del active_downloads[user_id]
             return
         
-        await status_msg.edit_text("📤 در حال آپلود به تلگرام...")
+        await status_msg.edit_text("📤 در حال ارسال...")
         
         ext = os.path.splitext(filename)[1].lower()
         
@@ -141,32 +142,32 @@ async def handle_url(client: Client, message: Message):
             await client.send_video(
                 message.chat.id,
                 filepath,
-                caption=f"📹 {filename}\n📦 حجم: {format_size(file_size)}",
+                caption=f"📹 {filename}\n📦 {format_size(file_size)}",
                 supports_streaming=True
             )
         elif ext in ['.mp3', '.wav', '.ogg', '.flac', '.m4a']:
             await client.send_audio(
                 message.chat.id,
                 filepath,
-                caption=f"🎵 {filename}\n📦 حجم: {format_size(file_size)}"
+                caption=f"🎵 {filename}\n📦 {format_size(file_size)}"
             )
         else:
             await client.send_document(
                 message.chat.id,
                 filepath,
-                caption=f"📁 {filename}\n📦 حجم: {format_size(file_size)}"
+                caption=f"📁 {filename}\n📦 {format_size(file_size)}"
             )
         
         total_time = time.time() - start_time
         await status_msg.edit_text(
-            f"✅ **دانلود و ارسال کامل شد!**\n\n"
-            f"📁 نام: {filename}\n"
-            f"📦 حجم: {format_size(file_size)}\n"
-            f"⏱ زمان: {format_time(total_time)}"
+            f"✅ **کامل شد!**\n\n"
+            f"📁 {filename}\n"
+            f"📦 {format_size(file_size)}\n"
+            f"⏱ {format_time(total_time)}"
         )
         
     except Exception as e:
-        await status_msg.edit_text(f"❌ **خطا:**\n`{str(e)}`")
+        await status_msg.edit_text(f"❌ خطا:\n{str(e)}")
     
     finally:
         try:
